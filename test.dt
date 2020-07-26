@@ -1,0 +1,8 @@
+
+x = 0
+
+While x <= 10000000 Do 
+    x = x + 1
+End While
+
+Return x
