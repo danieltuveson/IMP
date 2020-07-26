@@ -1,1 +1,1 @@
-./bin/IMPExec
+./bin/IMPExec $1
