@@ -3,7 +3,7 @@ module IMP where
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 
-type ProgramState = Map String Aexp 
+type ProgramState = Map String Number 
 type Number = Double 
 
 newtype Loc = Loc String 
@@ -47,7 +47,7 @@ evalA :: Aexp -> ProgramState -> Number
 evalA a s = 
   case a of 
     Num n    -> n 
-    LocAexp (Loc l) -> evalA (s Map.! l) s
+    LocAexp (Loc l) -> s Map.! l
     Add n m  -> evalA n s + evalA m s
     Sub n m  -> evalA n s - evalA m s
     Mult n m -> evalA n s * evalA m s
@@ -73,12 +73,11 @@ evalC :: Com -> ProgramState -> ProgramState
 evalC c s = 
   case c of 
     Skip          -> s 
-    Set (Loc l) a -> Map.insert l a s
+    Set (Loc l) a -> Map.insert l (evalA a s) s
     Seq c1 c2     -> evalC c2 (evalC c1 s)
     If b c1 c2    -> if evalB b s then evalC c1 s else evalC c2 s
     While b c     
-      | evalB b s -> 
-        if evalB b s then evalC (Seq c $ While b c) s else s
+      | evalB b s -> evalC (Seq c $ While b c) s
       | otherwise -> s
 
 evalR :: Return -> ProgramState -> Number

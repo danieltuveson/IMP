@@ -4,36 +4,58 @@ import Text.Parsec
 import Text.Parsec.Char
 import Text.Parsec.String
 
-import Data.Maybe(isJust)
+import Data.Maybe(isJust, fromMaybe)
 import Data.Map.Strict (toList, empty)
 import qualified Data.Map.Strict as Map
 
 import IMP 
 
-parser :: GenParser Char st Number
+type BinaryOpParser inp out = Parser (inp -> inp -> out)
+
+parser :: Parser Number
 parser = 
-  do  c <- parseCommands
+  do  spaces 
+      c <- parseCommands
+      spaces 
       r <- parseReturn
       return $ evalR r (evalC c empty) 
 
 
-
--- Parses an infix operator, e.g. x + y, returns a tuple of the parsed arguments
-parseInfixOp :: GenParser Char st a -> String -> GenParser Char st (a, a)
-parseInfixOp p str = 
-  do  x1 <- p 
-      spaces 
-      string str 
+parseBinaryOp :: Parser a -> Parser a -> BinaryOpParser a b -> Parser b 
+parseBinaryOp parseLeft parseRight binaryOpP = 
+  do  l <- parseLeft
       spaces
-      x2 <- p 
-      return (x1, x2)
+      binaryOp <- binaryOpP
+      spaces
+      r <- parseRight
+      return $ binaryOp l r
 
+-- Parses an infix operator that may be applied recursively, 
+-- e.g. x + y - z * w ... 
+--      x And y Or z And w ...
+parseRecursiveBinaryOp :: Maybe a -> Parser a -> BinaryOpParser a a -> Parser a
+parseRecursiveBinaryOp maybeVal p binaryOpP = 
+  do  let val = fromMaybe p (return <$> maybeVal)
+      combined <- optionMaybe (try $ parseBinaryOp val p binaryOpP)
+      case combined of 
+        Nothing -> val 
+        Just c  -> 
+          do 
+            result <- optionMaybe (parseRecursiveBinaryOp (Just c) p binaryOpP)
+            case result of 
+              Nothing -> return c
+              Just r  -> return r
+
+-- Takes a string and returns a parser that parses that string 
+-- and returns the input value (or function) supplied
+stringToParser :: String -> a -> Parser a
+stringToParser str inp = string str >> return inp
 
 -- Parsers for Aexpressions: 
-parseAexp :: GenParser Char st Aexp
-parseAexp = spaces >> (parseNumber <|> parseOperator <|> parseLocAexp)
+parseAexp :: Parser Aexp
+parseAexp = parseMathOp -- <|> parseNumber <|> parseLocAexp
 
-parseNumber :: GenParser Char st Aexp
+parseNumber :: Parser Aexp
 parseNumber = -- many $ oneOf "0123456789"
   do  negative    <- optionMaybe $ oneOf "-"
       beforePoint <- many1 $ digit
@@ -43,60 +65,44 @@ parseNumber = -- many $ oneOf "0123456789"
       let num = (if isJust negative then "-" else "") ++ beforePoint
       return $ Num (read num :: Double) 
 
-parseLocAexp :: GenParser Char st Aexp
+parseLocAexp :: Parser Aexp
 parseLocAexp = many alphaNum >>= return . LocAexp . Loc
 
-parseOperator :: GenParser Char st Aexp
-parseOperator = 
-  do  num      <- (parseNumber <|> parseLocAexp)
-      spaces
-      operator <- oneOf "+-*"
-      spaces
-      rest     <- (parseOperator <|> parseNumber <|> parseLocAexp)
-      case operator of 
-        '+' -> return $ Add num rest 
-        '-' -> return $ Sub num rest 
-        '*' -> return $ Mult num rest 
+parseMathOp :: Parser Aexp
+parseMathOp = try $ parseRecursiveBinaryOp Nothing infixOp parser
+  where parser  = stringToParser "+" Add <|> stringToParser "-" Sub <|> stringToParser "*" Mult
+        infixOp = parseNumber <|> parseLocAexp
 
 
 -- Parsers for Bexpressions: 
-parseBexp :: GenParser Char st Bexp
-parseBexp = spaces >> (parseEq <|> parseLeq <|> parseNot <|> parseAnd <|> parseOr)
+parseBexp :: Parser Bexp
+parseBexp = parseBoolOp -- <|> parseEq <|> parseLeq <|> parseBoolean <?> "failed parsing boolean"-- <|> parseNot 
+  
+parseBoolean :: Parser Bexp
+parseBoolean = try $ stringToParser "True" T <|> stringToParser "False" F
 
-parseBoolean :: GenParser Char st Bexp
-parseBoolean = 
-  do  bool <- string "True" <|> string "False"
-      return $ if bool == "True" then T else F
+parseEq :: Parser Bexp
+parseEq = try $ parseBinaryOp parseAexp parseAexp (string "==" >> return Eq)
 
-parseEq :: GenParser Char st Bexp
-parseEq = parseInfixOp parseAexp "==" >>= return . uncurry Eq
+parseLeq :: Parser Bexp
+parseLeq = try $ parseBinaryOp parseAexp parseAexp (string "<=" >> return Leq)
 
-parseLeq :: GenParser Char st Bexp
-parseLeq = parseInfixOp parseAexp "<=" >>= return . uncurry Leq
-
-parseNot :: GenParser Char st Bexp
-parseNot = 
-  do  string "Not"
-      p <- parseBexp
-      return $ Not p 
-
-parseAnd :: GenParser Char st Bexp
-parseAnd = parseInfixOp parseBexp "And" >>= return . uncurry And
-
-parseOr :: GenParser Char st Bexp
-parseOr = parseInfixOp parseBexp "Or" >>= return . uncurry Or
+parseBoolOp :: Parser Bexp
+parseBoolOp = try $ parseRecursiveBinaryOp Nothing parser infixOp
+  where parser  = parseEq <|> parseLeq <|> parseBoolean
+        infixOp = stringToParser "&&" And <|> stringToParser "||" Or
 
 
 -- Parsers for commands:
-parseCommands :: GenParser Char st Com
-parseCommands = endOfLine >> spaces >> (parseSeq <|> parseSet <|> parseIf <|> parseWhile <|> parseSkip)
+parseCommands :: Parser Com
+parseCommands = parseSeq
 
 
-parseSkip :: GenParser Char st Com
-parseSkip = spaces >> return Skip
+parseSkip :: Parser Com
+parseSkip = try $ endOfLine >> spaces >> return Skip
 
-parseSet :: GenParser Char st Com
-parseSet = 
+parseSet :: Parser Com
+parseSet = try $
   do  l    <- lower 
       rest <- optionMaybe $ many alphaNum
       spaces 
@@ -108,70 +114,47 @@ parseSet =
           Nothing  -> Set (Loc [l]) x
           Just str -> Set (Loc (l : str)) x
 
-parseSeq :: GenParser Char st Com
-parseSeq = 
-  do  x <- parseCommands 
-      y <- parseCommands
-      return $ Seq x y 
+parseSeq :: Parser Com
+parseSeq = try $ parseRecursiveBinaryOp Nothing parser infixOp
+  where parser = parseSet <|> parseIf <|> parseWhile
+        infixOp = return Seq
 
-parseIf :: GenParser Char st Com
-parseIf = 
+parseIf :: Parser Com
+parseIf = try $ 
   do  string "If"
-      space
+      many1 space
       b <- parseBexp
-      space
+      many1 space
       string "Then"
+      many1 space
       c1 <- parseCommands
+      many1 space
       string "Else"
+      many1 space
       c2 <- parseCommands
+      many1 space
       string "End If"
       return $ If b c1 c2
 
-parseWhile :: GenParser Char st Com
-parseWhile = 
+parseWhile :: Parser Com
+parseWhile = try $
   do  string "While"
-      space
+      many1 space
       b <- parseBexp
-      space
+      many1 space
       string "Do"
+      many1 space
       c <- parseCommands
+      many1 space
       string "End While"
       return $ While b c
 
 -- Parse return 
-parseReturn :: GenParser Char st Return
-parseReturn = string "Return" >> space >> parseLocAexp >>= return . Return 
-
-{-|
-
-data Com 
-  = Skip
-  | Set Loc Aexp
-  | Seq Com Com 
-  | If Bexp Com Com 
-  | While Bexp Com 
-
-data Aexp 
-  = Num Number 
-  | LocAexp Loc
-  | Add Aexp Aexp 
-  | Sub Aexp Aexp 
-  | Mult Aexp Aexp
-  deriving(Show)
-
-data Bexp 
-  = T
-  | F
-  | Eq Aexp Aexp 
-  | Leq Aexp Aexp
-  | Not Bexp 
-  | Or Bexp Bexp
-  | And Bexp Bexp
-  deriving(Show)
-
-data Sexp 
-  = Empty 
-  | Cons Char Sexp 
-  deriving(Show)
-
--}
+parseReturn :: Parser Return
+parseReturn = 
+  do  string "Return" 
+      many1 space
+      toReturn <- parseLocAexp 
+      spaces
+      eof
+      return (Return toReturn)
