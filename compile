@@ -1,0 +1,4 @@
+ghc IMPExec.hs
+mv IMPExec ./bin 
+mv *.o ./bin 
+mv *.hi ./bin
